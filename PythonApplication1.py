@@ -377,7 +377,24 @@ def build_reduced(all_tbl: pd.DataFrame, t1=T1, t2=T2):
         "V, м/с","r, км","theta_s, град","Theta_s, град","alpha, град","phi, град"
     ]]
 
-def save_excels(all_tbl: pd.DataFrame, reduced_tbl: pd.DataFrame, orbit_tbl: pd.DataFrame, summary_blocks, out_traj1: Path, out_all: Path):
+def _safe_save_workbook(wb: openpyxl.Workbook, out_path: Path) -> Path:
+    try:
+        wb.save(out_path)
+        return out_path
+    except PermissionError:
+        alt_path = out_path.with_name(f"{out_path.stem}_new{out_path.suffix}")
+        wb.save(alt_path)
+        return alt_path
+
+
+def save_excels(
+    all_tbl: pd.DataFrame,
+    reduced_tbl: pd.DataFrame,
+    orbit_tbl: pd.DataFrame,
+    summary_blocks,
+    out_traj1: Path,
+    out_all: Path,
+):
     # -------- Variant_35_traj_1.xlsx (в одной вкладке, как CSV-эталон) --------
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -404,7 +421,7 @@ def save_excels(all_tbl: pd.DataFrame, reduced_tbl: pd.DataFrame, orbit_tbl: pd.
         r = write_values(ws, r, red_headers, row.tolist())
 
     autosize(ws)
-    wb.save(out_traj1)
+    out_traj1_saved = _safe_save_workbook(wb, out_traj1)
 
     # -------- Variant_35_traj_1_All_Trajectory.xlsx --------
     wb2 = openpyxl.Workbook()
@@ -415,7 +432,8 @@ def save_excels(all_tbl: pd.DataFrame, reduced_tbl: pd.DataFrame, orbit_tbl: pd.
     for _, row in all_tbl.iterrows():
         rr = write_values(ws2, rr, all_headers, row.tolist())
     autosize(ws2)
-    wb2.save(out_all)
+    out_all_saved = _safe_save_workbook(wb2, out_all)
+    return out_traj1_saved, out_all_saved
 
 
 # -------------------------
@@ -443,7 +461,14 @@ def _flight_path_angle(x_m: float, y_m: float, vx: float, vy: float, p: Params) 
     return math.asin(s)
 
 
-def simulate_all_bvp(p: Params, t1: float, t2: float, theta1_rate: float, theta2: float):
+def simulate_all_bvp(
+    p: Params,
+    t1: float,
+    t2: float,
+    theta1_rate: float,
+    theta2: float,
+    max_steps: int = 2_000_000,
+):
     """Интегрирование траектории с законом тангажа (1.2) через ϑ̇1 и ϑ2.
 
     Возвращает:
@@ -527,6 +552,7 @@ def simulate_all_bvp(p: Params, t1: float, t2: float, theta1_rate: float, theta2
         k = math.floor(tcur / p.dt_base + 1e-12) + 1
         return k * p.dt_base
 
+    steps = 0
     while True:
         vx, vy, x, y, m = state
         V = math.hypot(vx, vy)
@@ -566,6 +592,9 @@ def simulate_all_bvp(p: Params, t1: float, t2: float, theta1_rate: float, theta2
 
         t, state = t_new, new_state
         record(t, state, phase)
+        steps += 1
+        if steps > max_steps:
+            raise RuntimeError("Превышен лимит шагов интегрирования в simulate_all_bvp.")
 
         # переключение фаз (важно: строка t2 должна быть с P=0)
         if phase == Phase.SEG1 and abs(t - t1) < 1e-12:
@@ -581,9 +610,17 @@ def simulate_all_bvp(p: Params, t1: float, t2: float, theta1_rate: float, theta2
     return df_raw, r_final, theta_final
 
 
-def solve_bvp_newton(p: Params, t1: float, t2: float, theta1_rate0: float, theta2_0: float,
-                     tol_r: float = 1e-3, tol_theta_deg: float = 1e-5,
-                     max_iter: int = 30):
+def solve_bvp_newton(
+    p: Params,
+    t1: float,
+    t2: float,
+    theta1_rate0: float,
+    theta2_0: float,
+    tol_r: float = 1e-3,
+    tol_theta_deg: float = 1e-5,
+    max_iter: int = 30,
+    max_steps: int = 2_000_000,
+):
     """Решение краевой задачи методом Ньютона (модифицированным: Якоби через конечные разности)."""
     R_target = p.R + p.h_isl
     tol_theta = math.radians(tol_theta_deg)
@@ -591,7 +628,14 @@ def solve_bvp_newton(p: Params, t1: float, t2: float, theta1_rate0: float, theta
     u = np.array([float(theta1_rate0), float(theta2_0)], dtype=float)  # [ϑ̇1, ϑ2]
 
     def F(uvec):
-        df_raw, r_fin, theta_fin = simulate_all_bvp(p, t1, t2, uvec[0], uvec[1])
+        df_raw, r_fin, theta_fin = simulate_all_bvp(
+            p,
+            t1,
+            t2,
+            uvec[0],
+            uvec[1],
+            max_steps=max_steps,
+        )
         return np.array([r_fin - R_target, theta_fin], dtype=float), df_raw
 
     F0, _ = F(u)
@@ -636,28 +680,137 @@ def solve_bvp_newton(p: Params, t1: float, t2: float, theta1_rate0: float, theta
     return float(u[0]), float(u[1]), max_iter, F0
 
 
+class OptimizationResult:
+    def __init__(self, t1, t2, theta1_rate, theta2, final_mass, residual_r, residual_theta):
+        self.t1 = t1
+        self.t2 = t2
+        self.theta1_rate = theta1_rate
+        self.theta2 = theta2
+        self.final_mass = final_mass
+        self.residual_r = residual_r
+        self.residual_theta = residual_theta
+
+
+def optimize_times(
+    p: Params,
+    t1_bounds: tuple[float, float],
+    t2_bounds: tuple[float, float],
+    t1_steps: int = 5,
+    t2_steps: int = 5,
+    refinement_rounds: int = 2,
+    max_steps: int = 2_000_000,
+) -> OptimizationResult:
+    """Оптимизация длительностей активных участков (t1, t2) по максимальной массе на орбите."""
+    theta1_end0 = math.radians(THETA_END1_DEG)
+    theta2_0 = math.radians(THETA2_DEG)
+    best = None
+
+    t1_min, t1_max = t1_bounds
+    t2_min, t2_max = t2_bounds
+
+    for round_idx in range(refinement_rounds + 1):
+        print(f"Optimization round {round_idx + 1}/{refinement_rounds + 1}...")
+        t1_grid = np.linspace(t1_min, t1_max, t1_steps)
+        t2_grid = np.linspace(t2_min, t2_max, t2_steps)
+        for t1 in t1_grid:
+            for t2 in t2_grid:
+                if t2 <= t1 + 1e-6:
+                    continue
+                theta1_rate0 = (theta1_end0 - math.pi / 2.0) / max(1e-12, (t1 - p.tv))
+                try:
+                    theta1_rate, theta2, _it, F = solve_bvp_newton(
+                        p,
+                        t1,
+                        t2,
+                        theta1_rate0,
+                        theta2_0,
+                        max_steps=max_steps,
+                    )
+                    df_raw, _r_fin, _theta_fin = simulate_all_bvp(
+                        p,
+                        t1,
+                        t2,
+                        theta1_rate,
+                        theta2,
+                        max_steps=max_steps,
+                    )
+                except RuntimeError:
+                    continue
+                final_mass = float(df_raw["m, кг"].iloc[-1])
+                candidate = OptimizationResult(
+                    t1=t1,
+                    t2=t2,
+                    theta1_rate=theta1_rate,
+                    theta2=theta2,
+                    final_mass=final_mass,
+                    residual_r=float(F[0]),
+                    residual_theta=float(F[1]),
+                )
+                if best is None or candidate.final_mass > best.final_mass:
+                    best = candidate
+
+        t1_step = (t1_max - t1_min) / max(1, (t1_steps - 1))
+        t2_step = (t2_max - t2_min) / max(1, (t2_steps - 1))
+        t1_min = max(t1_bounds[0], best.t1 - t1_step)
+        t1_max = min(t1_bounds[1], best.t1 + t1_step)
+        t2_min = max(t2_bounds[0], best.t2 - t2_step)
+        t2_max = min(t2_bounds[1], best.t2 + t2_step)
+
+    if best is None:
+        raise RuntimeError("Оптимизация не дала допустимых решений.")
+    return best
+
+
 
 def main():
     p = Params()
+    max_steps = 2_000_000
 
-    # --- Решение краевой задачи: подбираем ϑ̇1 и ϑ2 при фиксированных T1, T2 ---
-    theta1_end0 = math.radians(THETA_END1_DEG)
-    theta1_rate0 = (theta1_end0 - math.pi/2.0) / max(1e-12, (T1 - p.tv))
-    theta2_0 = math.radians(THETA2_DEG)
+    # --- Оптимизация времени активных участков ---
+    print("Optimization: start search for t1/t2...")
+    best = optimize_times(
+        p=p,
+        t1_bounds=(T1 - 50.0, T1 + 50.0),
+        t2_bounds=(T2 - 80.0, T2 + 80.0),
+        t1_steps=5,
+        t2_steps=5,
+        refinement_rounds=2,
+        max_steps=max_steps,
+    )
+    print(
+        "Optimization: "
+        f"t1={best.t1:.3f} s, t2={best.t2:.3f} s, m_final={best.final_mass:.3f} kg, "
+        f"dR={best.residual_r:.6e} m, dtheta={math.degrees(best.residual_theta):.6e} deg"
+    )
 
-    theta1_rate, theta2, it, F = solve_bvp_newton(p, T1, T2, theta1_rate0, theta2_0)
+    # --- Решение краевой задачи на оптимальных временах ---
+    theta1_rate, theta2, it, F = solve_bvp_newton(
+        p,
+        best.t1,
+        best.t2,
+        best.theta1_rate,
+        best.theta2,
+        max_steps=max_steps,
+    )
     print(f"BVP(Newton): iter={it}, dR={F[0]:.6e} m, dtheta={math.degrees(F[1]):.6e} deg")
     print(f"Solved: theta1_rate={theta1_rate:.15e} rad/s, theta2={math.degrees(theta2):.15f} deg")
 
-    df_raw, _r_fin, _theta_fin = simulate_all_bvp(p, T1, T2, theta1_rate, theta2)
+    df_raw, _r_fin, _theta_fin = simulate_all_bvp(
+        p,
+        best.t1,
+        best.t2,
+        theta1_rate,
+        theta2,
+        max_steps=max_steps,
+    )
     all_tbl = add_derived(df_raw, p)
 
-    summary_blocks = compute_summary_blocks(all_tbl, p)
-    reduced_tbl = build_reduced(all_tbl)
+    summary_blocks = compute_summary_blocks(all_tbl, p, t1=best.t1, t2=best.t2)
+    reduced_tbl = build_reduced(all_tbl, t1=best.t1, t2=best.t2)
 
     # элементы орбиты в конце 1-го и 2-го АУТ
     uniq = all_tbl.drop_duplicates(subset=["t, с"], keep="first").reset_index(drop=True)
-    row1 = uniq.loc[np.isclose(uniq["t, с"], T1)].iloc[0]
+    row1 = uniq.loc[np.isclose(uniq["t, с"], best.t1)].iloc[0]
     row2 = uniq.iloc[-1]
 
     rp1, ra1, a1, e1 = orbit_elements_from_row(row1, p)
@@ -672,7 +825,7 @@ def main():
     )
 
     base = Path(__file__).resolve().parent
-    save_excels(
+    out_traj1, out_all = save_excels(
         all_tbl=all_tbl,
         reduced_tbl=reduced_tbl,
         orbit_tbl=orbit_tbl,
@@ -680,7 +833,7 @@ def main():
         out_traj1=base / "Variant_35_traj_1.xlsx",
         out_all=base / "Variant_35_traj_1_All_Trajectory.xlsx",
     )
-    print("OK: созданы Variant_35_traj_1.xlsx и Variant_35_traj_1_All_Trajectory.xlsx")
+    print(f"OK: созданы {out_traj1.name} и {out_all.name}")
 
 if __name__ == "__main__":
     main()
