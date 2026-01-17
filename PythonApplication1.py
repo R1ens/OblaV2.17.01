@@ -8,6 +8,7 @@ import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
+from bvpnewton import solve_bvp_newton, build_linear_guess
 
 # -------------------------
 # Исходные данные варианта 35
@@ -453,6 +454,23 @@ def main():
         out_all=base / "Variant_35_traj_1_All_Trajectory.xlsx",
     )
     print("OK: созданы Variant_35_traj_1.xlsx и Variant_35_traj_1_All_Trajectory.xlsx")
+
+def solve_bvp_example():
+    """Пример решения краевой задачи методом Ньютона (использует bvpnewton.py)."""
+    def f(x, y):
+        return np.array([y[1], -y[0]])
+
+    def bc(y_a, y_b):
+        return np.array([y_a[0], y_b[0] - 1.0])
+
+    _x_guess, y_guess = build_linear_guess(a=0.0, b=1.0, y_a=[0.0, 0.0], y_b=[1.0, 0.0], n=50)
+    result = solve_bvp_newton(f, bc, 0.0, 1.0, y_guess, n=50)
+    print(
+        "BVP: converged={}, iterations={}, residual={:.3e}".format(
+            result.converged, result.iterations, result.residual_norm
+        )
+    )
+    return result
 
 if __name__ == "__main__":
     main()
