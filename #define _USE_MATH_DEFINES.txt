@@ -1,0 +1,390 @@
+#define _USE_MATH_DEFINES
+#include <iostream>
+#include <cstdlib>
+#include <vector>
+#include <cmath>
+#include <fstream>
+#include <iomanip>
+struct parametr
+{
+double tetta1;
+double tetta2;
+double t1;
+double t2;
+};
+std::vector <double> runge_kutt_4(parametr p, bool save);
+const double Mm = 4903 * 1e9;
+const double Rm = 1738 * 1e3;
+double P_0 = 10300.0;
+double W_0 = 3370.0;
+double betta_0 = P_0 / W_0;
+double tmax = 1525 / (P_0 / W_0);
+double m_0 = 3000.0;
+double gx(double x, double y)
+{
+return (Mm * x) / (pow((pow(x, 2) + pow((y + Rm), 2)), 1.5));
+}
+double gy(double x, double y)
+{
+return (Mm * (Rm + y)) / (pow((pow(x, 2) + pow((y + Rm), 2)), 1.5));
+}
+double P(bool off)
+{
+if (off)
+{
+return 0;
+}
+else
+{
+return P_0;
+}
+}
+double tetta(double t, double tb, double t1, double t2, double tk, parametr p)
+{
+if (t < tb)
+{
+return M_PI_2;
+}
+if (tb < t && t <= p.t1)
+{
+return M_PI_2 + p.tetta1 * (t - tb);
+}
+if (p.t1 < t && t < p.t2)
+{
+return M_PI_2 + p.tetta1 * (t - tb);
+}
+if (p.t2 <= t)
+{
+return (p.tetta2);
+}
+}
+double betta(bool off) {
+double betta_0 = P_0 / W_0;
+if (off)
+{
+return 0.0;
+}
+else
+{
+return betta_0;
+}
+}
+std::vector <double> runge_kutt_4(parametr p, bool save)
+{
+double k1x, k1y, k1vx, k1vy, k1m, k2x, k2y, k2vx, k2vy, k2m, k3x, k3y, k3vx, k3vy, k3m, k4x, k4y, k4vx, k4vy, k4m;
+double x, y, vx, vy, m, m_new, x_new, y_new, vx_new, vy_new, v_new, dt, t;
+double t2, tk, t1, tb;
+double h, t_o, c, dv, l;
+double H, vk, v, mt;
+double r, TEtta, tettas, alfa, TETTA;
+std::vector <double> rezult;
+tk = 820;
+tb = 14;
+t = 0;
+dt = 0.1;
+y = 0;
+x = 0;
+vx = 0;
+vy = 0;
+h = 0;
+vx_new = 0;
+l = 0;
+vy_new = 0;
+x_new = 0;
+y_new = 0;
+m_new = m_0;
+m = m_0;
+t_o = 0;
+H = 318000;
+vk = sqrt(Mm / (H + Rm));
+bool off = false;
+v = sqrt(vx * vx + vy * vy);
+//std::cout <<"РК4 1 "<< m<<" " << W_0<<" " << p.tetta1<<" " << p.tetta2;
+while (abs(v - vk) > 0.000001)
+{
+rezult.clear();
+if (p.t1 <= t && t < p.t2)
+{
+off = true;
+}
+else
+{
+off = false;
+}
+k1vx = dt * ((P(off) / m) * cos(tetta(t, tb, p.t1, p.t2, tk, p)) - gx(x, y));
+k1vy = dt * ((P(off) / m) * sin(tetta(t, tb, p.t1, p.t2, tk, p)) - gy(x, y));
+k1x = dt * vx;
+k1y = dt * vy;
+k1m = -dt * betta(off);
+k2vx = dt * ((P(off) / (m + k1m / 2)) * cos(tetta(t + dt / 2, tb, p.t1, p.t2, tk, p)) - gx(x + k1x / 2, y + k1y / 2));
+k2vy = dt * ((P(off) / (m + k1m / 2)) * sin(tetta(t + dt / 2, tb, p.t1, p.t2, tk, p)) - gy(x + k1x / 2, y + k1y / 2));
+k2x = dt * (vx + k1vx / 2);
+k2y = dt * (vy + k1vy / 2);
+k2m = -dt * betta(off);
+k3vx = dt * ((P(off) / (m + k2m / 2)) * cos(tetta(t + dt / 2, tb, p.t1, p.t2, tk, p)) - gx(x + k2x / 2, y + k2y / 2));
+k3vy = dt * ((P(off) / (m + k2m / 2)) * sin(tetta(t + dt / 2, tb, p.t1, p.t2, tk, p)) - gy(x + k2x / 2, y + k2y / 2));
+k3x = dt * (vx + k2vx / 2);
+k3y = dt * (vy + k2vy / 2);
+k3m = -dt * betta(off);
+k4vx = dt * ((P(off) / (m + k3m)) * cos(tetta(t + dt, tb, p.t1, p.t2, tk, p)) - gx(x + k3x, y + k3y));
+k4vy = dt * ((P(off) / (m + k3m)) * sin(tetta(t + dt, tb, p.t1, p.t2, tk, p)) - gy(x + k3x, y + k3y));
+k4x = dt * (vx + k3vx);
+k4y = dt * (vy + k3vy);
+k4m = -dt * betta(off);
+vx_new = vx_new + (k1vx + 2 * k2vx + 2 * k3vx + k4vx) / 6;
+vy_new = vy_new + (k1vy + 2 * k2vy + 2 * k3vy + k4vy) / 6;
+x_new = x_new + (k1x + 2 * k2x + 2 * k3x + k4x) / 6;
+y_new = y_new + (k1y + 2 * k2y + 2 * k3y + k4y) / 6;
+m_new = m_new + (k1m + 2 * k2m + 2 * k3m + k4m) / 6;
+if ((sqrt(vx_new * vx_new + vy_new * vy_new) - vk) > 0)
+{
+dt /= 10;
+l = l + 1;
+vx_new = vx_new - (k1vx + 2 * k2vx + 2 * k3vx + k4vx) / 6;
+vy_new = vy_new - (k1vy + 2 * k2vy + 2 * k3vy + k4vy) / 6;
+x_new = x_new - (k1x + 2 * k2x + 2 * k3x + k4x) / 6;
+y_new = y_new - (k1y + 2 * k2y + 2 * k3y + k4y) / 6;
+m_new = m_new - (k1m + 2 * k2m + 2 * k3m + k4m) / 6;
+continue;
+}
+v_new = sqrt(vx_new * vx_new + vy_new * vy_new);
+t = t + dt;
+x = x_new;
+y = y_new;
+vx = vx_new;
+vy = vy_new;
+m = m_new;
+v = v_new;
+t_o = 0;
+if (l < 0.5)
+{
+dt = 0.1;
+}
+if (((p.t1 - t) < 0.1) && ((p.t1 - t) > 0.00001))
+{
+dt = p.t1 - t;
+c = 0.1 - dt;
+}
+if (abs(p.t1 - t) < 0.00001)
+{
+dt = c;
+}
+if (((p.t2 - t) < 0.1) && ((p.t2 - t) > 0.00001))
+{
+dt = p.t2 - t;
+c = 0.1 - dt;
+}
+if (abs(p.t2 - t) < 0.00001)
+{
+dt = c;
+}
+r = pow(((y + Rm) * (y + Rm) + x * x), 0.5);
+TEtta = asin((x * vx + (y + Rm) * vy) / (pow((x * x + (y + Rm) * (y + Rm)), 0.5) * pow(vx * vx + vy * vy, 0.5)));
+tettas = atan(vy / vx);
+alfa = tetta(t, tb, p.t1, p.t2, tk, p) - tettas;
+TETTA = TEtta + alfa;
+mt = 3000 - m;
+rezult.push_back(t);//0
+rezult.push_back(m);//1
+rezult.push_back(vx);//2
+rezult.push_back(vy);//3
+rezult.push_back(x / 1000);//4
+rezult.push_back(y / 1000); //5
+rezult.push_back(tettas * 180 / M_PI);//6
+rezult.push_back(TETTA * 180 / M_PI);//7
+rezult.push_back(TEtta * 180 / M_PI);//8
+rezult.push_back(P(off));//9
+rezult.push_back(alfa * 180 / M_PI);//10
+rezult.push_back(sqrt(gx(x, y) * gx(x, y) + gy(x, y) * gy(x, y)));//11
+rezult.push_back((r - Rm) / 1000); //12
+rezult.push_back(v_new);//13
+rezult.push_back(r / 1000);//14
+rezult.push_back(tetta(t, tb, p.t1, p.t2, tk, p) * 180 / M_PI);//15
+rezult.push_back(atan(x / (Rm + y)) * 180 / M_PI);//16
+rezult.push_back(3000 - m);//17
+rezult.push_back(r );//18
+/*std::ofstream file("rezult1030150toch.txt", std::ios_base::app);
+if (file.is_open() && save)
+{
+file << std::setprecision(15) << rezult[0];
+file << "\t";
+file << std::setprecision(15) << rezult[1];
+file << "\t";
+file << std::setprecision(15) << rezult[2];
+file << "\t";
+file << std::setprecision(15) << rezult[3];
+file << "\t";
+file << std::setprecision(15) << rezult[4];
+file << "\t";
+file << std::setprecision(15) << rezult[5];
+file << "\t";
+file << std::setprecision(15) << rezult[6];
+file << "\t";
+file << std::setprecision(15) << rezult[7];
+file << "\t";
+file << std::setprecision(15) << rezult[8];
+file << "\t";
+file << std::setprecision(15) << rezult[9];
+file << "\t";
+file << std::setprecision(15) << rezult[10];
+file << "\t";
+file << std::setprecision(15) << rezult[11];
+file << "\t";
+file << std::setprecision(15) << rezult[12];
+file << "\t";
+file << std::setprecision(15) << rezult[13];
+file << "\t";
+file << std::setprecision(15) << rezult[14];
+file << "\t";
+file << std::setprecision(15) << rezult[15];
+file << "\t";
+file << std::setprecision(15) << rezult[16];
+file << "\n";
+file.close();
+}*/
+//std::cout << std::setprecision(15) << rezult[0] << " " << std::setprecision(15) << " " << rezult[1] << " " << std::setprecision(15) << " " << rezult[2] << " " << std::setprecision(15) << " " << rezult[3] << " " << std::setprecision(15) << " " << rezult[4] << " " << std::setprecision(15) << " " << rezult[5] << " " << std::setprecision(15) << " " << rezult[6]-Rm << " " << std::setprecision(15) << " " << std::setprecision(15) << " " << rezult[7] << " " << std::setprecision(15) << " " << rezult[8] << " " << rezult[9] << " " << std::setprecision(15) << " " << rezult[10] << " " << std::setprecision(15) << " " << rezult[11] << " " << std::setprecision(15) << " " << std::setprecision(15) << " " << rezult[12] << "\n";
+}
+return rezult;
+}
+std::vector <double> metod(parametr p)
+{
+double drob;
+double dtetta1 = 1e-9;
+double drdt1;
+double drdtetta1;
+double dtetta2 = 1e-9;
+double drdt2;
+double drdtetta2;
+double dtob;
+double dtdt1;
+double dTEttadtetta1;
+double dtdt2;
+double dTEttadtetta2;
+double del;
+double htetta1;
+double htetta2;
+double Rl = 318000 + Rm;
+std::vector <double> kraevaya;
+while ((abs(Rl - runge_kutt_4(p, false)[18]) > 0.0001) or abs(runge_kutt_4(p, false)[8]) > 0.00001)
+{
+drob = Rl - runge_kutt_4(p, false)[18];
+p.tetta1 += dtetta1;
+drdt1 = Rl - runge_kutt_4(p, false)[18];
+p.tetta1 -= dtetta1;
+drdtetta1 = (drdt1 - drob) / dtetta1;
+p.tetta2 += dtetta2;
+drdt2 = Rl - runge_kutt_4(p, false)[18];
+p.tetta2 -= dtetta2;
+drdtetta2 = (drdt2 - drob) / dtetta2;
+dtob = runge_kutt_4(p, false)[8];
+p.tetta1 += dtetta1;
+dtdt1 = runge_kutt_4(p, false)[8];
+p.tetta1 -= dtetta1;
+dTEttadtetta1 = (dtdt1 - dtob) / dtetta1;
+p.tetta2 += dtetta2;
+dtdt2 = runge_kutt_4(p, false)[8];
+p.tetta2 -= dtetta2;
+dTEttadtetta2 = (dtdt2 - dtob) / dtetta2;
+del = abs(drdtetta1 * dTEttadtetta2 - drdtetta2 * dTEttadtetta1);
+htetta1 = (dTEttadtetta2 * drob - drdtetta2 * dtob) / del;
+htetta2 = (drdtetta1 * dtob - dTEttadtetta1 * drob) / del;
+p.tetta1 += htetta1;
+p.tetta2 += htetta2;
+}
+kraevaya.push_back(p.tetta1);
+kraevaya.push_back(p.tetta2);
+return kraevaya;
+}
+std::vector <double> prime(parametr p)
+{
+double dt1 = 0.1;
+double dt2 = 0.1;
+double dmtdt1;
+double mtdt1;
+double mtdt;
+double dmtdt2;
+double mtdt2;
+double grad = 100;
+double a = 50;
+std::vector <double> optumys;
+while (grad > 0.00107)
+{
+std::cout << grad<<"\n";
+optumys = metod(p);
+p.tetta1 = optumys[0];
+p.tetta2 = optumys[1];
+mtdt = runge_kutt_4(p, false)[17];
+p.t1 += dt1;
+optumys = metod(p);
+p.tetta1 = optumys[0];
+p.tetta2 = optumys[1];
+mtdt1 = runge_kutt_4(p, false)[17];
+dmtdt1 = (mtdt1 - mtdt) / dt1;
+p.t1 -= dt1;
+p.t2 += dt2;
+optumys = metod(p);
+p.tetta1 = optumys[0];
+p.tetta2 = optumys[1];
+mtdt2 = runge_kutt_4(p, false)[17];
+dmtdt2 = (mtdt2 - mtdt) / dt2;
+p.t2 -= dt2;
+grad = sqrt(dmtdt1 * dmtdt1 + dmtdt2 * dmtdt2);
+p.t1 -= a * dmtdt1;
+p.t2 -= a * dmtdt2;
+optumys = metod(p);
+}
+optumys.push_back(p.t1);
+optumys.push_back(p.t2);
+std::cout << std::setprecision(15) << p.t1 << " \n " << p.t2 << " \n" << p.tetta1 << "\n " << p.tetta2;
+return optumys;
+}
+double superprime()
+{
+parametr p;
+p.tetta1 = -M_PI / 2 / (tmax - 14);
+p.tetta2 = -M_PI / 6;
+p.t1 = 450;
+p.t2 = 750;
+std::vector<double> prouz;
+std::vector<double> prouz2;
+double dM, dm, dW, dw, dm1, dm2, dw1, dw2;
+dm = 0.1;
+dw = 0.1;
+prouz = prime(p);
+p.tetta1 = prouz[0];
+p.tetta2 = prouz[1];
+p.t1 = prouz[2];
+p.t2 = prouz[3];
+dm1 = runge_kutt_4(p, false)[5] - 615;
+m_0 += dm;
+prouz2 = metod(p);
+p.tetta1 = prouz2[0];
+p.tetta2 = prouz2[1];
+dm2 = runge_kutt_4(p, false)[5] - 615 - dm;
+dM = (dm2 - dm1) / dm;
+m_0 -= dm;
+W_0 += dw;
+46
+prouz2 = metod(p);
+p.tetta1 = prouz2[0];
+p.tetta2 = prouz2[1];
+dw2 = runge_kutt_4(p, false)[5] - 615;
+dW = (dw2 - dm1) / dw;
+std::cout << std::setprecision(15) << dM << " " << dW;
+return dM;
+}
+int main()
+{
+setlocale(LC_ALL, "Russian");
+std::vector <double> a;
+double b;
+parametr p;
+p.tetta1 = -0.0044;
+p.tetta2 = -0.7126;
+p.t1 = 433.059;
+p.t2 = 1342.681;
+prime(p);
+//a = runge_kutt_4(p, true);
+//superprime();
+return 0;
+}
