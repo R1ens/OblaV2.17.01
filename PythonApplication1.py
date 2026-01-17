@@ -422,6 +422,14 @@ def save_excels(all_tbl: pd.DataFrame, reduced_tbl: pd.DataFrame, orbit_tbl: pd.
 def main():
     p = Params()
 
+    bvp_result = solve_bvp_example()
+    if not bvp_result.converged:
+        raise RuntimeError(
+            "BVP не сошлась: iterations={}, residual={:.3e}".format(
+                bvp_result.iterations, bvp_result.residual_norm
+            )
+        )
+
     df_raw = simulate_all(p)
     all_tbl = add_derived(df_raw, p)
 
