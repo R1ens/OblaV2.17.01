@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 
 
 from pathlib import Path
@@ -8,7 +8,6 @@ import pandas as pd
 import openpyxl
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
-from bvpnewton import solve_bvp_newton, build_linear_guess
 
 # -------------------------
 # Исходные данные варианта 35
@@ -151,8 +150,7 @@ def rk4_step(t, state, dt, phase, p: Params, dtheta1, theta1_end, theta2):
 def simulate_all(p: Params, t1=T1, t2=T2, theta_end1_deg=THETA_END1_DEG, theta2_deg=THETA2_DEG):
     theta1_end = math.radians(theta_end1_deg)
     theta2 = math.radians(theta2_deg)
-    dtheta1 = theta1_end
-    #(theta1_end - math.pi/2) / (t1 - p.tv)
+    dtheta1 = (theta1_end - math.pi/2.0) / max(1e-12, (t1 - p.tv))  # угловая скорость ϑ̇1    #(theta1_end - math.pi/2) / (t1 - p.tv)
     Vtarget = math.sqrt(p.mu / (p.R + p.h_isl))
     print (theta1_end)
     print (theta2)
@@ -419,18 +417,239 @@ def save_excels(all_tbl: pd.DataFrame, reduced_tbl: pd.DataFrame, orbit_tbl: pd.
     autosize(ws2)
     wb2.save(out_all)
 
+
+# -------------------------
+# Решение краевой задачи (модифицированный метод Ньютона, без метода секущих)
+# Неизвестные: ϑ̇1 (theta1_rate) и ϑ2 (theta2) при фиксированных t1, t2.
+# Параметр останова интегрирования: |V(tk) - V_isl| -> 0 (повышенная точность).
+# Граничные условия: |r(tk) - R_isl| -> 0 и |θ(tk)| -> 0.
+# См. раздел 2 «Решение краевой задачи» в приложенных материалах.
+# -------------------------
+
+def _flight_path_angle(x_m: float, y_m: float, vx: float, vy: float, p: Params) -> float:
+    """Угол наклона траектории к местному горизонту (рад).
+
+    Используем определение, согласованное с C++-листингом: 
+    theta = asin( (r·v)/(|r||v|) ). На целевой круговой орбите r·v = 0 => theta = 0.
+    """
+    rx, ry = x_m, p.R + y_m
+    r = math.hypot(rx, ry)
+    v = math.hypot(vx, vy)
+    if r < 1e-12 or v < 1e-12:
+        return 0.0
+    s = (rx*vx + ry*vy) / (r*v)
+    # защита от накопленной погрешности
+    s = max(-1.0, min(1.0, s))
+    return math.asin(s)
+
+
+def simulate_all_bvp(p: Params, t1: float, t2: float, theta1_rate: float, theta2: float):
+    """Интегрирование траектории с законом тангажа (1.2) через ϑ̇1 и ϑ2.
+
+    Возвращает:
+      df_raw: таблица шага интегрирования (как в simulate_all)
+      r_final: конечный радиус-вектор (м)
+      theta_final: конечный угол наклона траектории к горизонту (рад)
+    """
+    Beta = p.P / p.W
+
+    def theta_s(tloc: float, phasecur: str):
+        # важно: в момент t2 (до включения тяги) угол уже «переставлен» на theta2 (как в эталонных таблицах)
+        if phasecur == Phase.COAST and abs(tloc - t2) < 1e-12:
+            return theta2
+        if tloc <= p.tv:
+            return math.pi / 2
+        if tloc <= t1:
+            return math.pi / 2 + theta1_rate * (tloc - p.tv)
+        if tloc < t2:
+            # на ПУТ тяга выключена, но для согласования вывода оставляем продолжение формулы
+            return math.pi / 2 + theta1_rate * (tloc - p.tv)
+        return theta2
+
+    def thrust_for_phase(phasecur: str) -> bool:
+        return phasecur in (Phase.SEG1, Phase.SEG2)
+
+    def deriv(tloc: float, s: np.ndarray, phasecur: str) -> np.ndarray:
+        vx, vy, x, y, m = s
+        rx, ry = x, p.R + y
+        r = math.hypot(rx, ry)
+
+        ax_g = -p.mu * rx / (r**3)
+        ay_g = -p.mu * ry / (r**3)
+
+        if thrust_for_phase(phasecur):
+            ts = theta_s(tloc, phasecur)
+            ax_t = (p.P / m) * math.cos(ts)
+            ay_t = (p.P / m) * math.sin(ts)
+            dm = -Beta
+        else:
+            ax_t = ay_t = 0.0
+            dm = 0.0
+
+        return np.array([ax_g + ax_t, ay_g + ay_t, vx, vy, dm], dtype=float)
+
+    def rk4_step_local(t, state, dt, phasecur):
+        k1 = deriv(t, state, phasecur)
+        k2 = deriv(t + dt/2, state + dt*k1/2, phasecur)
+        k3 = deriv(t + dt/2, state + dt*k2/2, phasecur)
+        k4 = deriv(t + dt,   state + dt*k3,   phasecur)
+        return state + (dt/6) * (k1 + 2*k2 + 2*k3 + k4)
+
+    Vtarget = math.sqrt(p.mu / (p.R + p.h_isl))
+
+    t = 0.0
+    state = np.array([0.0, 0.0, 0.0, 0.0, 3000.0], dtype=float)  # vx, vy, x, y, m
+    dt_ref = p.dt_base
+
+    phase = Phase.SEG1
+    duplicated_tv = False
+    rows = []
+
+    def thrust_for_output(phasecur):
+        return p.P if phasecur in (Phase.SEG1, Phase.SEG2) else 0.0
+
+    def record(tcur, st, phasecur):
+        nonlocal duplicated_tv
+        vx, vy, x, y, m = st
+        ts = theta_s(tcur, phasecur)
+        Pc = thrust_for_output(phasecur)
+        rows.append((tcur, m, vx, vy, x, y, ts, Pc))
+        if (not duplicated_tv) and abs(tcur - p.tv) < 1e-12:
+            rows.append((tcur, m, vx, vy, x, y, ts, Pc))
+            duplicated_tv = True
+
+    record(t, state, phase)
+
+    def is_on_grid(tcur):
+        return abs((tcur / p.dt_base) - round(tcur / p.dt_base)) < 1e-10
+
+    def next_grid_time(tcur):
+        k = math.floor(tcur / p.dt_base + 1e-12) + 1
+        return k * p.dt_base
+
+    while True:
+        vx, vy, x, y, m = state
+        V = math.hypot(vx, vy)
+
+        if abs(V - Vtarget) <= p.tol_v:
+            break
+
+        dt = dt_ref
+
+        # попадание в t1/t2 ровно
+        if phase == Phase.SEG1 and t + dt > t1:
+            dt = t1 - t
+        elif phase == Phase.COAST and t + dt > t2:
+            dt = t2 - t
+
+        # выравнивание обратно на сетку 0.1
+        if dt_ref == p.dt_base:
+            if abs(t - t1) < 1e-12 and not is_on_grid(t):
+                dt = next_grid_time(t) - t
+            if abs(t - t2) < 1e-12 and not is_on_grid(t):
+                dt = next_grid_time(t) - t
+
+        new_state = rk4_step_local(t, state, dt, phase)
+        t_new = t + dt
+        V_new = math.hypot(new_state[0], new_state[1])
+
+        # уточнение шага десятками, если «перепрыгнули» целевую скорость
+        if dt_ref > p.dt_min and V_new >= Vtarget:
+            dt_ref = max(dt_ref / 10.0, p.dt_min)
+            continue
+
+        if dt_ref <= p.dt_min and V_new >= Vtarget:
+            # дошли до предела уточнения
+            t, state = t_new, new_state
+            record(t, state, phase)
+            break
+
+        t, state = t_new, new_state
+        record(t, state, phase)
+
+        # переключение фаз (важно: строка t2 должна быть с P=0)
+        if phase == Phase.SEG1 and abs(t - t1) < 1e-12:
+            phase = Phase.COAST
+        elif phase == Phase.COAST and abs(t - t2) < 1e-12:
+            phase = Phase.SEG2
+
+    vx, vy, x, y, _m = state
+    r_final = math.hypot(x, p.R + y)
+    theta_final = _flight_path_angle(x, y, vx, vy, p)
+
+    df_raw = pd.DataFrame(rows, columns=["t, с","m, кг","V_x, м/с","V_y, м/с","x, м","y, м","theta_s_rad","P, Н"])
+    return df_raw, r_final, theta_final
+
+
+def solve_bvp_newton(p: Params, t1: float, t2: float, theta1_rate0: float, theta2_0: float,
+                     tol_r: float = 1e-3, tol_theta_deg: float = 1e-5,
+                     max_iter: int = 30):
+    """Решение краевой задачи методом Ньютона (модифицированным: Якоби через конечные разности)."""
+    R_target = p.R + p.h_isl
+    tol_theta = math.radians(tol_theta_deg)
+
+    u = np.array([float(theta1_rate0), float(theta2_0)], dtype=float)  # [ϑ̇1, ϑ2]
+
+    def F(uvec):
+        df_raw, r_fin, theta_fin = simulate_all_bvp(p, t1, t2, uvec[0], uvec[1])
+        return np.array([r_fin - R_target, theta_fin], dtype=float), df_raw
+
+    F0, _ = F(u)
+
+    for it in range(max_iter):
+        if abs(F0[0]) < tol_r and abs(F0[1]) < tol_theta:
+            return float(u[0]), float(u[1]), it, F0
+
+        # шаги для численного дифференцирования
+        du1 = max(1e-9, abs(u[0]) * 1e-6)
+        du2 = max(1e-9, abs(u[1]) * 1e-6)
+
+        F1, _ = F(u + np.array([du1, 0.0]))
+        F2, _ = F(u + np.array([0.0, du2]))
+
+        J = np.column_stack(((F1 - F0) / du1, (F2 - F0) / du2))
+
+        try:
+            step = np.linalg.solve(J, -F0)
+        except np.linalg.LinAlgError:
+            # запасной вариант: псевдообратная
+            step = -np.linalg.pinv(J) @ F0
+
+        # демпфирование шага (чтобы не «улетать»)
+        lam = 1.0
+        best_u = u
+        best_F = F0
+        best_norm = float(np.linalg.norm(F0))
+
+        for _ in range(8):
+            cand_u = u + lam * step
+            cand_F, _ = F(cand_u)
+            cand_norm = float(np.linalg.norm(cand_F))
+            if cand_norm < best_norm:
+                best_u, best_F, best_norm = cand_u, cand_F, cand_norm
+                break
+            lam *= 0.5
+
+        u = best_u
+        F0 = best_F
+
+    return float(u[0]), float(u[1]), max_iter, F0
+
+
+
 def main():
     p = Params()
 
-    bvp_result = solve_bvp_example()
-    if not bvp_result.converged:
-        raise RuntimeError(
-            "BVP не сошлась: iterations={}, residual={:.3e}".format(
-                bvp_result.iterations, bvp_result.residual_norm
-            )
-        )
+    # --- Решение краевой задачи: подбираем ϑ̇1 и ϑ2 при фиксированных T1, T2 ---
+    theta1_end0 = math.radians(THETA_END1_DEG)
+    theta1_rate0 = (theta1_end0 - math.pi/2.0) / max(1e-12, (T1 - p.tv))
+    theta2_0 = math.radians(THETA2_DEG)
 
-    df_raw = simulate_all(p)
+    theta1_rate, theta2, it, F = solve_bvp_newton(p, T1, T2, theta1_rate0, theta2_0)
+    print(f"BVP(Newton): iter={it}, dR={F[0]:.6e} m, dtheta={math.degrees(F[1]):.6e} deg")
+    print(f"Solved: theta1_rate={theta1_rate:.15e} rad/s, theta2={math.degrees(theta2):.15f} deg")
+
+    df_raw, _r_fin, _theta_fin = simulate_all_bvp(p, T1, T2, theta1_rate, theta2)
     all_tbl = add_derived(df_raw, p)
 
     summary_blocks = compute_summary_blocks(all_tbl, p)
@@ -462,23 +681,6 @@ def main():
         out_all=base / "Variant_35_traj_1_All_Trajectory.xlsx",
     )
     print("OK: созданы Variant_35_traj_1.xlsx и Variant_35_traj_1_All_Trajectory.xlsx")
-
-def solve_bvp_example():
-    """Пример решения краевой задачи методом Ньютона (использует bvpnewton.py)."""
-    def f(x, y):
-        return np.array([y[1], -y[0]])
-
-    def bc(y_a, y_b):
-        return np.array([y_a[0], y_b[0] - 1.0])
-
-    _x_guess, y_guess = build_linear_guess(a=0.0, b=1.0, y_a=[0.0, 0.0], y_b=[1.0, 0.0], n=50)
-    result = solve_bvp_newton(f, bc, 0.0, 1.0, y_guess, n=50)
-    print(
-        "BVP: converged={}, iterations={}, residual={:.3e}".format(
-            result.converged, result.iterations, result.residual_norm
-        )
-    )
-    return result
 
 if __name__ == "__main__":
     main()
