@@ -592,9 +592,17 @@ def simulate_all_bvp(
     return df_raw, r_final, theta_final
 
 
-def solve_bvp_newton(p: Params, t1: float, t2: float, theta1_rate0: float, theta2_0: float,
-                     tol_r: float = 1e-3, tol_theta_deg: float = 1e-5,
-                     max_iter: int = 30):
+def solve_bvp_newton(
+    p: Params,
+    t1: float,
+    t2: float,
+    theta1_rate0: float,
+    theta2_0: float,
+    tol_r: float = 1e-3,
+    tol_theta_deg: float = 1e-5,
+    max_iter: int = 30,
+    max_steps: int = 2_000_000,
+):
     """Решение краевой задачи методом Ньютона (модифицированным: Якоби через конечные разности)."""
     R_target = p.R + p.h_isl
     tol_theta = math.radians(tol_theta_deg)
@@ -602,7 +610,14 @@ def solve_bvp_newton(p: Params, t1: float, t2: float, theta1_rate0: float, theta
     u = np.array([float(theta1_rate0), float(theta2_0)], dtype=float)  # [ϑ̇1, ϑ2]
 
     def F(uvec):
-        df_raw, r_fin, theta_fin = simulate_all_bvp(p, t1, t2, uvec[0], uvec[1])
+        df_raw, r_fin, theta_fin = simulate_all_bvp(
+            p,
+            t1,
+            t2,
+            uvec[0],
+            uvec[1],
+            max_steps=max_steps,
+        )
         return np.array([r_fin - R_target, theta_fin], dtype=float), df_raw
 
     F0, _ = F(u)
@@ -685,7 +700,14 @@ def optimize_times(
                     continue
                 theta1_rate0 = (theta1_end0 - math.pi / 2.0) / max(1e-12, (t1 - p.tv))
                 try:
-                    theta1_rate, theta2, _it, F = solve_bvp_newton(p, t1, t2, theta1_rate0, theta2_0)
+                    theta1_rate, theta2, _it, F = solve_bvp_newton(
+                        p,
+                        t1,
+                        t2,
+                        theta1_rate0,
+                        theta2_0,
+                        max_steps=max_steps,
+                    )
                     df_raw, _r_fin, _theta_fin = simulate_all_bvp(
                         p,
                         t1,
@@ -724,6 +746,7 @@ def optimize_times(
 
 def main():
     p = Params()
+    max_steps = 2_000_000
 
     # --- Оптимизация времени активных участков ---
     print("Optimization: start search for t1/t2...")
@@ -734,6 +757,7 @@ def main():
         t1_steps=5,
         t2_steps=5,
         refinement_rounds=2,
+        max_steps=max_steps,
     )
     print(
         "Optimization: "
@@ -742,11 +766,25 @@ def main():
     )
 
     # --- Решение краевой задачи на оптимальных временах ---
-    theta1_rate, theta2, it, F = solve_bvp_newton(p, best.t1, best.t2, best.theta1_rate, best.theta2)
+    theta1_rate, theta2, it, F = solve_bvp_newton(
+        p,
+        best.t1,
+        best.t2,
+        best.theta1_rate,
+        best.theta2,
+        max_steps=max_steps,
+    )
     print(f"BVP(Newton): iter={it}, dR={F[0]:.6e} m, dtheta={math.degrees(F[1]):.6e} deg")
     print(f"Solved: theta1_rate={theta1_rate:.15e} rad/s, theta2={math.degrees(theta2):.15f} deg")
 
-    df_raw, _r_fin, _theta_fin = simulate_all_bvp(p, best.t1, best.t2, theta1_rate, theta2)
+    df_raw, _r_fin, _theta_fin = simulate_all_bvp(
+        p,
+        best.t1,
+        best.t2,
+        theta1_rate,
+        theta2,
+        max_steps=max_steps,
+    )
     all_tbl = add_derived(df_raw, p)
 
     summary_blocks = compute_summary_blocks(all_tbl, p, t1=best.t1, t2=best.t2)
